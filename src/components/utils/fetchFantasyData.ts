@@ -2,7 +2,6 @@ import { createClient } from "@supabase/supabase-js";
 import axios from "axios";
 import { Database } from '../../../supabase';
 
-const openAiApiKey = process.env.NEXT_PUBLIC_API_AIRSTACK || '';
 const supabaseApiKey = process.env.NEXT_PUBLIC_API_SUP || '';
 
 const supabase = createClient<Database>(
@@ -55,14 +54,10 @@ export const fetchFantasyData = async (): Promise<FantasyEntry[]> => {
           fid = parseInt(last_name, 10);
 
           if (Number.isInteger(fid)) {
-            const server = "https://hubs.airstack.xyz";
+            const server = "https://hub.merv.fun";
             try {
               // Fetch user data by fid
               const response = await axios.get(`${server}/v1/userDataByFid?fid=${fid}`, {
-                headers: {
-                  "Content-Type": "application/json",
-                  "x-airstack-hubs": openAiApiKey
-                }
               });
 
               // Extract profile image, username, and location from response

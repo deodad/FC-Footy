@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from "react";
-import { usePrivy } from "@privy-io/react-auth";
 import Image from "next/image";
 import { fetchTeamLogos } from "./utils/fetchTeamLogos";
 import {
   getTeamPreferences,
   setTeamPreferences,
 } from "../lib/kvPerferences";
+import { sdk } from "@farcaster/frame-sdk";
+import { useMiniAppDetection } from "../hooks/useMiniAppDetection";
 
 interface Team {
   name: string;
@@ -13,74 +14,115 @@ interface Team {
   league: string;
   logoUrl: string;
 }
+
+interface SettingsFollowClubsProps {
+  onSave?: (newFavorites: string[]) => void;
+}
+
 const appUrl = process.env.NEXT_PUBLIC_URL;
 const altImage =`${appUrl}/512.png`
 
 // Helper function to generate a unique ID for each team.
 const getTeamId = (team: Team) => `${team.league}-${team.abbreviation}`;
 
-const Settings = () => {
+const SettingsFollowClubs: React.FC<SettingsFollowClubsProps> = ({ onSave }) => {
   const [teams, setTeams] = useState<Team[]>([]);
-  // favTeams now stores unique team IDs (e.g. "eng.1-ars")
   const [favTeams, setFavTeams] = useState<string[]>([]);
   const [searchTerm, setSearchTerm] = useState<string>("");
-  // loadingTeamIds will store the team IDs currently processing an update.
   const [loadingTeamIds, setLoadingTeamIds] = useState<string[]>([]);
-  const { user } = usePrivy();
-  const farcasterAccount = user?.linkedAccounts.find(
-    (account) => account.type === "farcaster"
-  );
+  const [transactionError, setTransactionError] = useState<string | null>(null);
+  const [hasPromptedMiniApp, setHasPromptedMiniApp] = useState<boolean>(false);
+  
+  const { isMiniApp, isLoading: isMiniAppLoading } = useMiniAppDetection();
 
   useEffect(() => {
-    if (farcasterAccount) {
-      const fid = Number(farcasterAccount.fid);
-      getTeamPreferences(fid)
-        .then((teamsFromRedis) => {
-          // console.log("Existing team preferences:", teamsFromRedis);
-          if (teamsFromRedis) {
-            setFavTeams(teamsFromRedis);
-          }
-        })
-        .catch((err) => {
-          console.error("Error fetching team preferences:", err);
-        });
-    }
+    const fetchContext = async () => {
+      const context = await sdk.context;
+      console.log("context now", context.user);
+      const fid = context.user?.fid;
+      if (fid) {
+        getTeamPreferences(fid)
+          .then((teamsFromRedis) => {
+            if (teamsFromRedis) {
+              setFavTeams(teamsFromRedis);
+            }
+          })
+          .catch((err) => {
+            console.error("Error fetching team preferences:", err);
+          });
+      }
+    };
+    fetchContext();
     fetchTeamLogos().then((data) => setTeams(data));
-  }, [farcasterAccount]);
+  }, []);
 
   const handleRowClick = async (team: Team) => {
-    if (!farcasterAccount) {
+    const context = await sdk.context;
+    console.log("context now", context.user);
+    const fid = context.user?.fid;
+    if (!fid) {
       console.error("User not authenticated");
       return;
     }
     const teamId = getTeamId(team);
-    const fid = Number(farcasterAccount.fid);
 
-    // Prevent new clicks if any update is already in progress.
+    // Prevent new clicks if any update is in progress
     if (loadingTeamIds.length > 0) return;
 
-    // Mark this team as loading.
+    // Mark this team as loading
     setLoadingTeamIds((prev) => [...prev, teamId]);
 
-    let updatedFavTeams: string[];
+    try {
+      let updatedFavTeams: string[];
 
-    if (favTeams.includes(teamId)) {
-      // console.log(`Removing ${team.name} (${teamId}) from notifications`);
-      updatedFavTeams = favTeams.filter((id) => id !== teamId);
-    } else {
-      // console.log(`Adding ${team.name} (${teamId}) as favorite`);
-      updatedFavTeams = [...favTeams, teamId];
-    }
+      if (favTeams.includes(teamId)) {
+        // Remove team
+        updatedFavTeams = favTeams.filter((id) => id !== teamId);
+      } else {
+        // Add team
+        updatedFavTeams = [...favTeams, teamId];
+      }
 
-    await setTeamPreferences(fid, updatedFavTeams);
-    setFavTeams(updatedFavTeams);
+      await setTeamPreferences(fid, updatedFavTeams);
+      setFavTeams(updatedFavTeams);
+      onSave?.(updatedFavTeams);
+      setTransactionError(null); // Clear error on success
 
-    // Remove the loading state for this team.
-    setLoadingTeamIds((prev) => prev.filter((id) => id !== teamId));
+      // Prompt to add mini app if this is their first team and they're not already in a mini app
+      if (
+        !hasPromptedMiniApp && 
+        updatedFavTeams.length === 1 && 
+        !isMiniApp && 
+        !isMiniAppLoading
+      ) {
+        try {
+          if (!sdk || !sdk?.actions?.addMiniApp) return;
+          await sdk.actions.ready();
+          await sdk.actions.addMiniApp();
+          setHasPromptedMiniApp(true);
+        } catch (error) {
+          console.log('User rejected mini app prompt or already has it added', error);
+          setHasPromptedMiniApp(true);
+        }
+      }
 
-    // Clear the search term if any.
-    if (searchTerm.trim() !== "") {
-      setSearchTerm("");
+      // Clear search term if needed
+      if (searchTerm.trim() !== "") {
+        setSearchTerm("");
+      }
+    } catch (error: unknown) {
+      console.error("Error updating team preferences:", error);
+      if (
+        error instanceof Error &&
+        error.message.includes("User rejected the request")
+      ) {
+        setTransactionError("User rejected transaction.");
+      } else {
+        setTransactionError("Transaction failed. Please try again.");
+      }
+    } finally {
+      // Remove the loading state for this team
+      setLoadingTeamIds((prev) => prev.filter((id) => id !== teamId));
     }
   };
 
@@ -132,6 +174,11 @@ const Settings = () => {
           onChange={(e) => setSearchTerm(e.target.value)}
           className="w-full bg-darkPurple p-2 border rounded-md border-limeGreenOpacity focus:outline-none focus:ring-2 focus:ring-darkPurple"
         />
+        {transactionError && (
+          <div className="text-center text-red-500 text-sm mb-2">
+            {transactionError}
+          </div>
+        )}
       </div>
 
       {/* Scrollable table container */}
@@ -141,7 +188,7 @@ const Settings = () => {
             <thead className="bg-darkPurple">
               <tr className="text-fontRed text-center border-b border-limeGreenOpacity">
                 <th className="py-1 text-left font-medium">
-                  Select clubs to get notifications
+                  Select your favorite team first
                 </th>
                 <th className="py-1 text-center font-medium"></th>
                 <th className="py-1 text-right font-medium"></th>
@@ -156,8 +203,13 @@ const Settings = () => {
                 <tr
                   key={teamId}
                   // Only allow row clicks if no row is loading.
-                  onClick={() => {
+                  onClick={async () => {
                     if (!isLoading && loadingTeamIds.length === 0) {
+                      try {
+                        await sdk.haptics.impactOccurred('medium');
+                      } catch {
+                        // ignore haptics errors
+                      }
                       handleRowClick(team);
                     }
                   }}
@@ -171,13 +223,6 @@ const Settings = () => {
                       {favTeams.includes(teamId) && (
                         <span role="img" aria-label="notification" className="ml-2">
                           🔔
-                          {/* <Image
-                            src="/banny_goal.png"
-                            alt="goal emoji"
-                            className="inline-block w-6 h-6"
-                            width={30}
-                            height={30}
-                          /> */}
                         </span>
                       )}
                     </div>
@@ -209,4 +254,4 @@ const Settings = () => {
   );
 };
 
-export default Settings;
+export default SettingsFollowClubs;

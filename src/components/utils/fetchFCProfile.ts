@@ -24,13 +24,17 @@ interface PinataResponse {
  */
 export async function fetchFanUserData(fanFid: number): Promise<Record<string, string[]>> {
   try {
-    const response = await fetch(`https://hub.pinata.cloud/v1/userDataByFid?fid=${fanFid}`);
+    const response = await fetch(`https://hub.merv.fun/v1/userDataByFid?fid=${fanFid}`, {
+      /* headers: {
+        "Content-Type": "application/json",
+        "api_key": NEYNAR_API_KEY
+      } */
+    });
     const data: PinataResponse = await response.json();
     // console.log("Data for fid:", fanFid, data);
     if (!data.messages || data.messages.length === 0) {
       return {};
     }
-
     // Object to store the extracted data types and their corresponding values
     const userDataMap: Record<string, string[]> = {};
 
@@ -44,7 +48,6 @@ export async function fetchFanUserData(fanFid: number): Promise<Record<string, s
         userDataMap[userData.type].push(userData.value);
       }
     }
-    // console.log("User data for fid:", fanFid, userDataMap.value);
     return userDataMap;
   } catch (error) {
     console.error("Error fetching fan user data for fid:", fanFid, error);

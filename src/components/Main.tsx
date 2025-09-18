@@ -1,188 +1,233 @@
+/* eslint-disable react-hooks/exhaustive-deps */
+/* eslint-disable @typescript-eslint/no-explicit-any */
 "use client";
 import { useEffect, useState } from "react";
-import frameSdk from "@farcaster/frame-sdk";
+import { sdk } from "@farcaster/frame-sdk";
 import { useSearchParams, useRouter } from "next/navigation";
 import { Dispatch, SetStateAction } from "react";
-
 import TabNavigation from "./TabNavigation";
 import MatchesTab from "./MatchesTab";
-import Contests from "./Contests";
+// import Contests from "./Contests";
 import ContentTab from "./ContentTab";
-import Scout from "./Scout";
 import Settings from "./Settings";
 import MoneyGames from "./MoneyGames";
+import OCaptain from "./OCaptain";
+import ForYou from "./ForYou";
 import { tabDisplayMap } from "../lib/navigation";
-import { usePrivy } from "@privy-io/react-auth";
-import { useLoginToFrame } from "@privy-io/react-auth/farcaster";
-// import { useSmartWallets } from "@privy-io/react-auth/smart-wallets";
-import { FrameContext } from "@farcaster/frame-node";
+import { Pingem } from 'pingem-sdk';
+import { useAccount } from "wagmi";
+import Rewards from "./Rewards";
+import { IS_TESTING } from "../lib/config";
+import Scout from "./Scout";
+
+interface SharedCast {
+  author: {
+    fid: number;
+    username?: string;
+    displayName?: string;
+    pfpUrl?: string;
+  };
+  hash: string;
+  parentHash?: string;
+  parentFid?: number;
+  timestamp?: number;
+  mentions?: Array<{
+    fid: number;
+    username?: string;
+    displayName?: string;
+    pfpUrl?: string;
+  }>;
+  text: string;
+  embeds?: string[];
+  channelKey?: string;
+}
 
 export default function Main() {
-  const [isAuthenticating, setIsAuthenticating] = useState(false);
-  const { ready, authenticated, user, createWallet, login} = usePrivy();
-  const { initLoginToFrame, loginToFrame } = useLoginToFrame();
-  const [showH2, setShowH2] = useState(true); // State to control visibility of h2
+  const { isConnected } = useAccount();
   const searchParams = useSearchParams();
   const router = useRouter();
   const [customSearchParams, setCustomSearchParams] = useState<URLSearchParams | null>(null);
   const effectiveSearchParams = searchParams || customSearchParams;
-  const selectedTab = effectiveSearchParams?.get("tab") || "matches";
+  const selectedTab = effectiveSearchParams?.get("tab") || "forYou";
   const selectedLeague = effectiveSearchParams?.get("league") || "eng.1";
 
-  // Now handleTabChange matches React.Dispatch<SetStateAction<string>>
+  // Handle URL redirect logic
+  useEffect(() => {
+    if (!effectiveSearchParams) return;
+
+    const shouldRedirect = effectiveSearchParams.get("redirect") === "true";
+    const url = effectiveSearchParams.get("url");
+
+    if (shouldRedirect && url) {
+      // Validate URL first
+      try {
+        new URL(url);
+        sdk.actions.openUrl(url);
+      } catch (error: any) {
+        console.error("Invalid URL provided:", url, error);
+      }
+    }
+  }, [effectiveSearchParams]);
+
+  // Handle shared cast detection
+  useEffect(() => {
+    const checkShareContext = async () => {
+      try {
+        // Check URL parameters first (available immediately)
+        const castHash = effectiveSearchParams?.get('castHash');
+        const castFid = effectiveSearchParams?.get('castFid');
+
+        // Check URL parameters for share extension
+
+        if (castHash && castFid) {
+          // Redirect to ForYou profile tab with cast author's FID
+          router.push(`/?tab=forYou&profileFid=${castFid}`);
+          return;
+        } 
+        
+        // Check SDK context for share
+        await sdk.actions.ready();
+        const context = await sdk.context;
+        
+        if (context?.location?.type === 'cast_share') {
+          const cast = context.location.cast as SharedCast;
+          // Redirect to ForYou profile tab with cast author's FID
+          router.push(`/?tab=forYou&profileFid=${cast.author.fid}`);
+        }
+      } catch (error) {
+        console.error('Error checking share context:', error);
+      }
+    };
+
+    checkShareContext();
+  }, [effectiveSearchParams, router]);
+
   const handleTabChange: Dispatch<SetStateAction<string>> = (value) => {
-    const newTab =
-      typeof value === "function" ? value(selectedTab) : value;
+    const newTab = typeof value === "function" ? value(selectedTab) : value;
     const league = effectiveSearchParams?.get("league") || "eng.1";
     router.push(`/?tab=${newTab}&league=${league}`);
   };
 
   const handleLeagueChange = (league: string) => {
-    const tab = effectiveSearchParams?.get("tab") || "matches";
+    const tab = effectiveSearchParams?.get("tab") || "forYou";
     router.push(`/?tab=${tab}&league=${league}`);
   };
 
-// UI state
-const [context, setContext] = useState<FrameContext>();
-const [errorMessage, setErrorMessage] = useState("");
+  // Loading states
+  const [isSDKLoaded, setIsSDKLoaded] = useState(false);
+  
+  useEffect(() => {
+    const load = async () => {
+      if (typeof window !== "undefined") {
+        setCustomSearchParams(new URLSearchParams(window.location.search));
+      }
 
-// Loading states
-const [isSDKLoaded, setIsSDKLoaded] = useState(false);
- 
-useEffect(() => {
-  const load = async () => {
-    const ctx = (await frameSdk.context) as FrameContext;
-    setContext(ctx);
-    // Temporarily disable ctx.location logic
-    // if (ctx.location && ctx.location?.type === "cast_embed") {
-    //   console.log("frame context:", ctx);
-    //   const url = new URL(ctx.location.type);
-    //   const params = new URLSearchParams(url.search);
-    //   const newParams = new URLSearchParams();
-    //   for (const [key, value] of params.entries()) {
-    //     if (key !== "tab") {
-    //       newParams.append(key, value);
-    //     }
-    //   }
-    //   newParams.append("tab", selectedTab);
-    //   setCustomSearchParams(url.searchParams);
-    // }
+      let domain = "";
+      if (typeof window !== "undefined") {
+        domain = window.location.hostname;
+        if (domain.startsWith("www.")) {
+          domain = domain.slice(4);
+        }
+      } 
+      const pingem = new Pingem();
+      await sdk.actions.ready();
+      await pingem.init(sdk, domain);
+      await pingem.ping('view');
+    };
 
-    if (typeof window !== "undefined") {
-      setCustomSearchParams(new URLSearchParams(window.location.search));
+    if (!isSDKLoaded) {
+      setIsSDKLoaded(true);
+      load();
     }
-
-    frameSdk.actions.ready({});
-  };
-
-  if (frameSdk && !isSDKLoaded) {
-    setIsSDKLoaded(true);
+  }, [isSDKLoaded]);
+    useEffect(() => {
+    const load = async () => {
+      try {
+        if (!sdk || !sdk?.actions?.addMiniApp) return;
+        await sdk.actions.ready({});
+        // await sdk.actions.addMiniApp();
+      } catch (err) {
+        console.warn('addMiniApp failed (likely non-miniapp or dev env):', err);
+      }
+    };
     load();
-  }
-}, [isSDKLoaded, selectedTab]);
- 
-// Login to Frame with Privy automatically
-  useEffect(() => {
-    if (ready && !authenticated) {
-      const login = async () => {
-        const { nonce } = await initLoginToFrame();
-        const result = await frameSdk.actions.signIn({ nonce: nonce });
-        await loginToFrame({
-          message: result.message,
-          signature: result.signature,
-        });
-      };
-      login();
-    } else if (ready && authenticated) {
-    }
-  }, [ready, authenticated, initLoginToFrame, loginToFrame]);
+  }, []);
 
-  useEffect(() => {
-    if (showH2) {
-      const timer = setTimeout(() => {
-        setShowH2(false); // Hide h2 after 3 seconds
-      }, 3000);
-
-      return () => clearTimeout(timer); // Cleanup the timer if component is unmounted
-    }
-  }, [showH2]);
-
-  useEffect(() => {
-    if (
-      authenticated &&
-      ready &&
-      user &&
-      user.linkedAccounts.filter(
-        (account) =>
-          account.type === "wallet" && account.walletClientType === "privy",
-      ).length === 0
-    ) {
-      createWallet();
-    }
-  }, [authenticated, createWallet, ready, user]);
-
-  const handleLogin = async () => {
-    setIsAuthenticating(true);
-    try {
-      await login(); // Use Privy's login method
-    } catch (error) {
-      console.error(error);
-      setErrorMessage("Login failed. Please try again.");
-    } finally {
-      setIsAuthenticating(false);
-    }
-  };
-
-  // Render loading state
-  if (!ready || isAuthenticating) {
-    return <div className="w-full h-full flex items-center justify-center">Loading...</div>;
-  }
-   
   // Render main app UI
   return (
-    <div className="w-[380px] mx-auto py-4 px-2">
-      {context === undefined && showH2 && (
-        <h2 className="text-2xl font-bold text-center text-notWhite">
-          The Footy App. Match previews, summaries, fantasy EPL, analysis and money games.
-        </h2>
-      )}
-      {!authenticated ? (
-        <div className="text-center text-lg text-fontRed">
-          <button
-            className={`flex-1 sm:flex-none w-full sm:w-48 bg-deepPink text-white py-2 px-4 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-deepPink hover:bg-fontRed`}
-            onClick={handleLogin}
-          >
-            Login
-          </button>
-          {errorMessage && <p className="text-red-500 mt-2">{errorMessage}</p>}
-        </div>
-      ) : (
-          <div className="w-[380px] mx-auto py-4 px-2">
-      <TabNavigation
-          selectedTab={selectedTab}
-          setSelectedTab={handleTabChange}
-          selectedLeague={selectedLeague}
-          setSelectedLeague={handleLeagueChange}
-          tabDisplayMap={tabDisplayMap}
-        />
-        <div className="bg-darkPurple p-4 rounded-md text-white">
-          {selectedTab === "matches" && (
-            <MatchesTab
-              league={selectedLeague}
+    <div className="w-[400px] mx-auto py-2">
+      {IS_TESTING || !isConnected ? (
+        IS_TESTING ? (
+          <div className="w-[400px] mx-auto py-1 px-2">
+            <div className="text-center text-sm text-gray-400 mb-2">
+              Testing Mode - Bypassing Connection Check
+            </div>
+            <TabNavigation
+              selectedTab={selectedTab}
               setSelectedTab={handleTabChange}
-              setSelectedLeague={handleLeagueChange}
+              tabDisplayMap={tabDisplayMap}
             />
-          )}
-          {selectedTab === "contests" && <Contests  />}
-          {selectedTab === "scoutPlayers" && <Scout />}
-          {selectedTab === "moneyGames" && <MoneyGames />}
-          {selectedTab === "extraTime" && <ContentTab />}
-          {selectedTab === "settings" && <Settings />}
-          {!["matches", "contests", "scoutPlayers", "moneyGames", "extraTime", "settings"].includes(selectedTab) && (
-            <div className="text-center text-lg text-fontRed">Coming soon...</div>
-          )}
-      </div>
-    </div>
+            <div className="bg-darkPurple p-2 rounded-md text-white">
+              {selectedTab === "matches" && (
+                <MatchesTab
+                  league={selectedLeague}
+                  setSelectedTab={handleTabChange}
+                  setSelectedLeague={handleLeagueChange}
+                />
+              )}
+              {/* {selectedTab === "contests" && <Contests />} */}
+              {selectedTab === "moneyGames" && <MoneyGames />}
+              {selectedTab === "oCaptain" && <OCaptain />}
+              {selectedTab === "rewards" && <Rewards />}
+              {selectedTab === "extraTime" && <ContentTab />}
+              {selectedTab === "settings" && <Settings />}
+              {selectedTab === "forYou" && <ForYou />}
+              {selectedTab === "scoutPlayers" && <Scout />}
+              {!["forYou", "matches", /* "contests", */ "scoutPlayers", "moneyGames", "oCaptain", "rewards", "extraTime", "settings"].includes(selectedTab) && (
+                <div className="text-center text-lg text-fontRed">Coming soon...</div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="text-center text-lg text-fontRed">
+            <button
+              className="flex-1 sm:flex-none w-full sm:w-48 bg-deepPink text-white py-2 px-4 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-deepPink hover:bg-fontRed"
+              onClick={() => {
+                window.location.href = "https://farcaster.xyz/miniapps/vRlFDfogkgrw/footy-app";
+              }}
+            >
+              Open Footy Mini-App
+            </button>
+          </div>
+        )
+      ) : (
+        <div className="w-[400px] mx-auto py-1 px-2">
+          <TabNavigation
+            selectedTab={selectedTab}
+            setSelectedTab={handleTabChange}
+            tabDisplayMap={tabDisplayMap}
+          />
+          <div className="bg-darkPurple p-2 rounded-md text-white">
+            {selectedTab === "matches" && (
+              <MatchesTab
+                league={selectedLeague}
+                setSelectedTab={handleTabChange}
+                setSelectedLeague={handleLeagueChange}
+              />
+            )}
+            {/* {selectedTab === "contests" && <Contests />} */}
+            {selectedTab === "moneyGames" && <MoneyGames />}
+            {selectedTab === "oCaptain" && <OCaptain />}
+            {selectedTab === "rewards" && <Rewards />}
+            {selectedTab === "extraTime" && <ContentTab />}
+            {selectedTab === "settings" && <Settings />}
+            {selectedTab === "forYou" && <ForYou />}
+            {selectedTab === "scoutPlayers" && <Scout />}
+            {!["forYou", "matches", /* "contests", */ "scoutPlayers", "moneyGames", "oCaptain", "rewards", "extraTime", "settings"].includes(selectedTab) && (
+              <div className="text-center text-lg text-fontRed">Coming soon...</div>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );

@@ -1,12 +1,17 @@
 import React, { useEffect, useState, useRef } from "react";
 import { usePrivy, useLogin, useFarcasterSigner } from "@privy-io/react-auth";
-import * as Account from "fhub/Account";
-import { useCastCreateMutation } from "~/hooks/fhub/useCastCreateMutation";
+import {HubRestAPIClient} from '@standard-crypto/farcaster-js';
+
+import { ExternalEd25519Signer } from "@standard-crypto/farcaster-js";
 import { emojiPacks } from "~/components/utils/customEmojis";
 import { getTeamPreferences } from "~/lib/kv";
-import { fetchCastByHash } from "./utils/fetchCasts";
+import { teamsByLeague, getTeamFullName } from "./utils/fetchTeamLogos";
+import { useFetchCastsParentUrl } from "./utils/useFetchCastsParentUrls";
+import { fetchFanUserData } from "./utils/fetchFCProfile";
+
 
 interface CastType {
+  timestamp: number;
   author: {
     pfp_url: string;
     username: string;
@@ -82,6 +87,7 @@ const ChatInput = ({
   showPackDropdown,
   setShowPackDropdown,
   addEmoji,
+  isPosting,
 }: {
   message: string;
   setMessage: (msg: string) => void;
@@ -95,6 +101,7 @@ const ChatInput = ({
   showPackDropdown: boolean;
   setShowPackDropdown: React.Dispatch<React.SetStateAction<boolean>>;
   addEmoji: (emojiCode: string) => void;
+  isPosting: boolean;
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -168,31 +175,32 @@ const ChatInput = ({
             />
           </div>
           <div className="flex flex-wrap gap-2 pt-2">
-            {(searchTerm
-              ? emojiPacks.flatMap((pack) =>
-                  pack.emojis
-                    .filter((emoji) =>
-                      emoji.code.toLowerCase().includes(searchTerm.toLowerCase())
-                    )
-                    .map((emoji): EmojiItem => ({
-                      ...emoji,
-                      packLabel: pack.label,
-                    }))
-                )
-              : (() => {
-                  const selected = emojiPacks.find((pack) => pack.name === selectedPack);
-                  if (!selected || !selected.emojis.length) {
-                    return [{
-                      type: 'message',
-                      content: "No emojis found for your team. Ask KMac to add them!"
-                    }] as EmojiItem[];
-                  }
-                  return selected.emojis.map((emoji): EmojiItem => ({
-                    ...emoji,
-                    packLabel: selected.label,
-                  }));
-                })()
-            ).map((item, idx) => {
+            {(() => {
+              const basePacks = emojiPacks.filter(pack =>
+                pack.name === "footy" || pack.name === selectedPack
+              );
+              const emojis = basePacks.flatMap((pack) =>
+                pack.emojis.map((emoji) => ({
+                  ...emoji,
+                  packLabel: pack.label,
+                }))
+              );
+
+              const filteredEmojis = searchTerm
+                ? emojis.filter((emoji) =>
+                    emoji.code.toLowerCase().includes(searchTerm.toLowerCase())
+                  )
+                : emojis;
+
+              if (filteredEmojis.length === 0) {
+                return [{
+                  type: 'message',
+                  content: "No emojis found. Try searching again!"
+                }] as EmojiItem[];
+              }
+
+              return filteredEmojis;
+            })().map((item, idx) => {
                 if ('type' in item && item.type === 'message') {
                   return (
                     <span key={idx} className="text-white text-sm italic">{item.content}</span>
@@ -229,12 +237,13 @@ const ChatInput = ({
           }
         }}
         maxLength={390}
-        placeholder="Type your cast... (use footy::smile for custom emoji)"
+        placeholder="COMING SOON... (tap ⚽️ for custom emojis)"
         className="w-full px-4 py-2 rounded-md border border-limeGreenOpacity bg-gray-800 text-white outline-none resize-none overflow-hidden pb-12"
       />
       <button
         onClick={onSubmit}
-        className="absolute bottom-2 right-4 h-10 px-4 rounded-md bg-deepPink text-black font-bold flex items-center justify-center"
+        disabled={isPosting}
+        className={`absolute bottom-2 right-4 h-10 px-4 rounded-md font-bold flex items-center justify-center ${isPosting ? 'bg-gray-400 cursor-not-allowed' : 'bg-deepPink text-black'}`}
         title="Send message"
       >
         <img
@@ -249,46 +258,99 @@ const ChatInput = ({
     </div>
   );
 };
-
-const ContentLiveChat = () => {
 const DEFAULT_CHANNEL_HASH: `0x${string}` = (process.env.NEXT_PUBLIC_DEFAULT_CHANNEL_HASH || "0x09c73260a2d39cb44fac1f488751fddd6b9fc0c0") as `0x${string}`;
-  const [casts, setCasts] = useState<CastType[]>([]);  const [message, setMessage] = useState("");
+
+const ContentLiveChat = ({ teamId }: { teamId: string }) => {
+  const leagueKey = teamId.split("-")[0];
+  const abbr = teamId.split("-")[1];
+  const teamName = getTeamFullName(abbr, leagueKey);
+  const roomHash =
+    teamsByLeague[leagueKey]?.find((t) => t.abbr === abbr)?.roomHash ??
+    DEFAULT_CHANNEL_HASH;
+  // const [casts, setCasts] = useState<CastType[]>([]);  
+  const [message, setMessage] = useState("");
   const [showEmojiPanel, setShowEmojiPanel] = useState(false);
   const [selectedPack, setSelectedPack] = useState(emojiPacks[0].name);
   const [searchTerm, setSearchTerm] = useState("");
   const [showPackDropdown, setShowPackDropdown] = useState(false);
   const [backgroundLogo, setBackgroundLogo] = useState<string | null>(null);
-  const [channel] = useState(`match:${DEFAULT_CHANNEL_HASH}`);
-  const [parentCastUrl, setParentCastUrl] = useState<string | null>(null);
-  const chatContainerRef = useRef<HTMLDivElement | null>(null);
+  const [isPosting, setIsPosting] = useState(false);
+  //console.log("ContentLiveChat received roomHash:", roomHash);
+  // const [setChannel] = useState(`match:${roomHash}`);
+  //console.log("Initial channel state:", `match:${roomHash}`);
+  const {casts: footyChat } = useFetchCastsParentUrl("https://d33m.com/gantry", "https://snapchain.pinnable.xyz");
+  const [enrichedChat, setEnrichedChat] = useState<CastType[]>([]);
+
+  const { login } = useLogin();
+  const { getFarcasterSignerPublicKey, signFarcasterMessage } = useFarcasterSigner();
+  const { requestFarcasterSignerFromWarpcast } = useFarcasterSigner();
+  const { authenticated, user } = usePrivy();
+  const signer = new ExternalEd25519Signer(signFarcasterMessage, getFarcasterSignerPublicKey);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    const enrichWithUserData = async () => {
+      const enriched = await Promise.all(
+        footyChat.map(async (cast): Promise<CastType> => {
+          const fan = await fetchFanUserData(cast.data?.fid || 0);
+          const fid = cast.data?.fid?.toString() ?? "0";
+          const teamIds = await getTeamPreferences(fid);
+          const teamId = teamIds?.[0];
+          const teamBadgeUrl = teamId ? getTeamLogoFromId(teamId) : null;
+
+          const username =
+            Array.isArray(fan?.USER_DATA_TYPE_USERNAME)
+              ? fan.USER_DATA_TYPE_USERNAME[0]
+              : fan?.USER_DATA_TYPE_USERNAME ?? fid;
+
+          const pfp_url =
+            Array.isArray(fan?.USER_DATA_TYPE_PFP)
+              ? fan.USER_DATA_TYPE_PFP[0]
+              : fan?.USER_DATA_TYPE_PFP ?? "/default-pfp.png";
+
+          return {
+            author: {
+              fid: fid,
+              username,
+              pfp_url,
+            },
+            text: cast.data?.castAddBody?.text ?? "",
+            timestamp: cast.data?.timestamp ?? 0,
+            teamBadgeUrl,
+          };
+        })
+      );
+      setEnrichedChat(enriched);
+    };
+    if (footyChat.length > 0) enrichWithUserData();
+  }, [footyChat]);
+  
+  // useEffect(() => {
+  //  setChannel(`match:${roomHash}`);
+  // }, [roomHash]);
+  // const [setParentCastUrl] = useState<string | null>(null);
+  const chatContainerRef = useRef<HTMLDivElement | null>(null);
+
+/*   useEffect(() => {
     if (channel.startsWith("hash:")) {
       const hash = channel.split("hash:")[1];
       setParentCastUrl(`https://warpcast.com/~/cast/${hash}`);
     } else {
       setParentCastUrl(null);
     }
-  }, [channel]);
+  }, [channel]); */
 
-  const { authenticated, user } = usePrivy();
-  
+ 
   useEffect(() => {
     const fetchUserTeamLogoAndEmoji = async () => {
       if (user?.farcaster?.fid) {
-        //console.log("Fetching team preferences for FID:", user.farcaster.fid);
         const teamIds = await getTeamPreferences(user.farcaster.fid.toString());
-        //console.log("Team IDs returned:", teamIds);
-
         const teamId = teamIds?.[0];
         if (teamId) {
           const logo = getTeamLogoFromId(teamId);
           setBackgroundLogo(logo);
-          //console.log("Setting background logo:", logo);
-
           const matchingPack = emojiPacks.find((pack) => pack.teamId === teamId);
           if (matchingPack) {
-            //console.log("Found matching emoji pack:", matchingPack.name);
             setSelectedPack(matchingPack.name);
           } else {
             console.log("No matching emoji pack found for teamId:", teamId);
@@ -312,105 +374,69 @@ const DEFAULT_CHANNEL_HASH: `0x${string}` = (process.env.NEXT_PUBLIC_DEFAULT_CHA
       }
     }, 50);
     return () => clearTimeout(timer);
-  }, [casts]);
-  
-  useEffect(() => {
-    const timeout = setTimeout(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, 100);
-    return () => clearTimeout(timeout);
-  }, [casts]);
-  
-  const { login } = useLogin();
-  const { getFarcasterSignerPublicKey, signFarcasterMessage } = useFarcasterSigner();
-  const { requestFarcasterSignerFromWarpcast } = useFarcasterSigner();
-  const farcasterAccount = user?.linkedAccounts.find(
-    (account) => account.type === "farcaster"
-  );
-
-const createCast = useCastCreateMutation();
-const messagesEndRef = useRef<HTMLDivElement>(null);
-
-const loadCasts = async () => {
-  const enriched = await fetchCastByHash();
-  setCasts(enriched);
-
-    if (chatContainerRef.current) {
-      const { scrollTop, scrollHeight, clientHeight } = chatContainerRef.current;
-      const isAtBottom = scrollTop + clientHeight >= scrollHeight - 50;
-      if (isAtBottom) {
-        // Scroll to bottom only if the user hasn't intentionally scrolled up
-        chatContainerRef.current.scrollTo({ top: chatContainerRef.current.scrollHeight, behavior: 'smooth' });
-      }
-    }
-};
-  
-  useEffect(() => {
-    const intervalId = setInterval(() => {
-      loadCasts(); // respect current selected channel
-    }, 5000);
-    return () => clearInterval(intervalId);
-  }, [channel]);
-  
-  useEffect(() => {
-    loadCasts();
-  }, []);
-
-
-  useEffect(() => {
-    fetchCastByHash();
-  }, []);
+  }, [footyChat]);
 
   const postMessage = async () => {
-  if (!authenticated) {
-    login();
-    return;
-  }
-  if (channel.startsWith("hash:") && !parentCastUrl) {
-    console.error("Error: cannot post reply without a valid cast hash.");
-    return;
-  }
-    if (farcasterAccount) {
-      const fid = Number(farcasterAccount.fid);
-      const signer = {
-        getSignerKey: getFarcasterSignerPublicKey,
-        signMessageHash: (messageHash: Uint8Array) =>
-          signFarcasterMessage(messageHash),
-      };
-      console.log("createCast:", createCast);
-      createCast.mutate({
-        account: Account.fromEd25519Signer({
-          fid: BigInt(fid),
-          signer,
-        }),
-        cast: {
-          text: {
-            value: message,
-            embeds: [],
-          },
-          parent: { type: "cast", hash: DEFAULT_CHANNEL_HASH, fid: BigInt(fid) },
-          isLong: false,
-        },
-      }, {
-        onSuccess: () => {
-          console.log("Cast sent successfully!");
-            setMessage("");
-            setShowEmojiPanel(false);
-            setTimeout(fetchCastByHash, 3000);
-        },
-        onError: (error) => {
-          console.error("Error sending cast:", error);
-        }
+    if (!authenticated) {
+      login();
+      return;
+    }
+
+    const farcasterAccount = user?.linkedAccounts.find((account) => account.type === "farcaster");
+    if (!farcasterAccount?.signerPublicKey) {
+      console.error("Farcaster signer not authorized yet");
+      await requestFarcasterSignerFromWarpcast();
+      setIsPosting(false);
+      return;
+    }
+
+    if (isPosting) return;
+    setIsPosting(true);
+
+    try {
+      const fid = user?.farcaster?.fid;
+      if (!fid) {
+        console.error("FID is undefined, cannot submit cast");
+        setIsPosting(false);
+        return;
+      }
+/*       const signer = new ExternalEd25519Signer(
+        signFarcasterMessage,
+        getFarcasterSignerPublicKey
+      ); */
+      
+      const client = new HubRestAPIClient({
+        // hubUrl: "https://snapchain-grpc.pinnable.xyz",
+        hubUrl: "https://crackle.farcaster.xyz:3381",
       });
-    } else {
-      console.log("Failed to auth");
+
+      console.log("Submitting cast with", { message, fid, signer });
+      const response = await client.submitCast(
+        {
+          text: message,
+          embeds: [],
+          // parentUrl: parentCastUrl || undefined, // optional
+        },
+        fid,
+        signer
+      );
+
+      console.log("Submitted cast:", response);
+      setMessage("");
+      setShowEmojiPanel(false);
+    } catch (error) {
+      console.error("Error sending cast:", error);
+    } finally {
+      setIsPosting(false);
     }
   };
 
   // Append an emoji code to the current message
   const addEmoji = (emojiCode: string) => {
     setMessage((prev) => {
-      const newMessage = prev + `${emojiCode} `;
+      const needsSpace = prev.length > 0 && !/\s$/.test(prev);
+      const spacer = needsSpace ? " " : "";
+      const newMessage = prev + spacer + emojiCode + " ";
       return newMessage.length <= 390 ? newMessage : prev;
     });
   };
@@ -429,26 +455,14 @@ const loadCasts = async () => {
       
       {/* Room name - shown above casts */}
       <div className="flex justify-start gap-2 mb-2 text-md">
-          🏟️ The Gantry
-    {/*     <button
-          onClick={() => {
-            setChannel("football");
-            loadCasts("football");
-          }}
-          className={`px-3 py-1 rounded text-sm ${
-            channel === "football"
-              ? "bg-deepPink text-black font-bold"
-              : "bg-gray-700 text-white"
-          }`}
-        >
-          ⚽ General Chat
-        </button> */}
+        {roomHash === DEFAULT_CHANNEL_HASH ? '🏟️ The Gantry' : `🏟️ ${teamName}`}
       </div>
 
       {/* Room casts */}
-      <div ref={chatContainerRef} className="w-full flex-1 overflow-y-auto space-y-3 scroll-pb-44 scroll-smooth overscroll-contain">        {casts.map((cast, idx) => (
-          <div key={idx} className="flex items-start text-sm text-white space-x-3 transition-all duration-300 ease-out">
-              <div className="relative w-6 h-6">
+      <div ref={chatContainerRef} className="w-full flex-1 overflow-y-auto space-y-3 scroll-pb-44 scroll-smooth overscroll-contain">
+      {enrichedChat.map((cast) => (
+        <div key={`${cast.author?.fid}-${cast.timestamp}`} className="flex items-start text-sm text-white space-x-3 transition-all duration-300 ease-out">
+          <div className="relative w-6 h-6">
                 <img src={cast.author.pfp_url} alt="pfp" className="w-6 h-6 rounded-full" />
                 {cast.teamBadgeUrl && (
                   <img
@@ -459,7 +473,7 @@ const loadCasts = async () => {
                 )}
               </div>
               <div className="flex-1 text-lightPurple break-words">
-                <span className="font-bold text-notWhite">@{cast.author.username}</span>{" "}
+                <span className="font-bold text-notWhite">{cast.author.username}</span>{" "}
                 {cast.text.split(/(https?:\/\/[^\s]+)/g).map((part, i) =>
                   part.match(/https?:\/\/[^\s]+/) ? (
                     <a
@@ -527,42 +541,10 @@ const loadCasts = async () => {
             showPackDropdown={showPackDropdown}
             setShowPackDropdown={setShowPackDropdown}
             addEmoji={addEmoji}
+            isPosting={isPosting}
           />
         </div>
-        {/* <div className="flex justify-around">
-          <button className="flex-1 py-3 px-2 text-center text-gray-500">
-            <div className="flex flex-col items-center">
-              <div className="mb-1">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 9a3 3 0 1 1 6 0c0 1.5-1.5 2.5-2 3l-1 1"></path>
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 18h.01"></path>
-                </svg>
-              </div>
-              <span className="text-xs">Find match</span>
-            </div>
-          </button>
-          <button className="flex-1 py-3 px-2 text-center text-gray-500">
-            <div className="flex flex-col items-center">
-              <div className="mb-1">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 9a3 3 0 1 1 6 0c0 1.5-1.5 2.5-2 3l-1 1"></path>
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 18h.01"></path>
-                </svg>
-              </div>
-              <span className="text-xs">Create room</span>
-            </div>
-          </button>
-          <button className="flex-1 py-3 px-2 text-center text-gray-500">
-            <div className="flex flex-col items-center">
-              <div className="mb-1">
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8c-1.657 0-3 1.343-3 3 0 .432.112.83.304 1.184M12 8c1.657 0 3 1.343 3 3 0 .432-.112.83-.304 1.184M12 2v2m0 16v2m-4-4h-2m10 0h-2m-4-4H6m12 0h-2"/>
-              </svg>
-              </div>
-              <span className="text-xs">Tip host</span>
-            </div>
-          </button>
-        </div> */}
+
       </div>
     </div>
   );

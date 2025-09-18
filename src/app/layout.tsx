@@ -5,7 +5,7 @@ import { Providers } from "~/app/providers";
 
 export const metadata: Metadata = {
   title: "Farcaster Footy App",
-  description: "Farcaster Footy App: Live Match Summaries, Fantasy League, Banter bot, Collectables & Contests",
+  description: "Farcaster Footy App: Live Match Summaries, Fantasy League, Banter bot & Collectables",
 };
 
 export default function RootLayout({
@@ -25,7 +25,7 @@ export default function RootLayout({
           rel="stylesheet"
         /> */}
       </head>
-      <body>
+      <body className="flex justify-center bg-black text-white m-0">
         <Providers>{children}</Providers>
       </body>
     </html>
